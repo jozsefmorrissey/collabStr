@@ -3,9 +3,12 @@
   "version": "1.0.0",
   "description": "",
   "dependencies": {
+    "command-line-parser": "^0.1.10",
     "express": "^4.16.4",
     "express-ws": "^4.0.0",
-    "request": "^2.88.0"
+    "logger": "0.0.1",
+    "request": "^2.88.0",
+    "shelljs": "^0.8.3"
   },
   "keywords": [],
   "author": ""

@@ -1,8 +1,14 @@
 const express = require('express');
 const enableWs = require('express-ws');
-const request = require('request');
+const argsObj = require('command-line-parser')();
 
+const configSrvc = require('./src/config').config();
+const logger = require('./src/logger').logger(argsObj.logLevel, argsObj.logFile);
 const diff_match_patch = require('./lib/diff-match-patch').diff_match_patch;
+
+const collabConfig = configSrvc('collab');
+const propList = configSrvc();
+logger.info("Config: \n" + JSON.stringify(propList, null, 2));
 
 const app = express();
 const sockets = [];
@@ -13,66 +19,6 @@ const topics = {};
 const userMap = {};
 const defaultMsg = "{}";
 enableWs(app);
-
-function buildUpdate(topic, msg, user) {
-  const req = {
-    url: `http://localhost:9999/page`,
-    json: true,
-    body:{
-      page: {
-        identifier: topic,
-        jsonObj: msg,
-      },
-      user,
-  }};
-  request.post(req, (err, req, body) => {
-    if (err) {
-      console.log(err);
-    } else {
-      console.log(body);
-    }
-  });
-}
-
-function getFunc(topic, user, success, failure) {
-  request.get(`http://localhost:9999/page/${topic}`, (error, res, body) => {
-    if (error) {
-      failure(error);
-    } else {
-      body ? success(body) : success('{}');
-    }
-  });
-}
-
-function authorized(user, topic, success, failure) {
-  console.log(user);
-  request.post(`http://localhost:9999/page`, {
-    form: {
-      page: {
-        identifier: topic,
-      },
-      user,
-    }
-  }, (error, res, body) => {
-    console.log(error);
-    if (error) {
-      failure(error);
-    } else {
-      success(body);
-    }
-  });
-}
-
-function getUserId(user) {
-  return user.email;
-}
-
-const config = {
-  authFunc: authorized,
-  updateFunc: buildUpdate,
-  getFunc: getFunc,
-  getUserId: getUserId,
-}
 
 
 function update() {
@@ -86,7 +32,7 @@ function update() {
     if (topic.lastUpdate.getTime() < staleTime.getTime() + (saveStaleInterval * 2)) {
       console.log('Updated ' + keys[index]);
       const randUser = topic.users[Math.floor(Math.random() * topic.users.length)];
-      config.updateFunc(keys[index], topic.message, randUser);
+      collabConfig.updateFunc(keys[index], topic.message, randUser);
     }
   }
   setTimeout(update, saveStaleInterval);
@@ -119,7 +65,7 @@ function getMessage(topic, user, socket) {
     topics[topic].message = msg;
     broadCast(topic);
   }
-  getFunc(topic, user, sendMessage);
+  collabConfig.getFunc(topic, user, sendMessage);
 }
 
 function updateTopic (ws, user, topic, patchObj) {
@@ -137,23 +83,29 @@ function updateTopic (ws, user, topic, patchObj) {
     topicObj.sockets.push(ws);
     topicObj.users.push(user);
     if (topics[topic] === undefined) {
+      logger.debug(`Pulling ${topic} from the database`);
       getMessage(topic, user, ws);
     } else {
-      ws.send(`{"content": "${topics[topic].message}"}`);
+      logger.debug(`Content aready saved, sending to new socket`);
+      ws.send(`{"content": ${topics[topic].message}}`);
     }
     topics[topic] = topicObj;
     return;
   }
 
   const patch = new diff_match_patch().patch_apply(patchObj, topicObj.message);
-  topicObj.message = patch[0];
-  topics[topic] = topicObj;
-  broadCast(topic, patchObj, ws);
+  if (typeof collabConfig.messageValidate === 'function' && collabConfig.messageValidate(patch[0])) {
+    logger.debug(`Patched Message: \n${patch[0]}\n`);
+    topicObj.message = patch[0];
+    topics[topic] = topicObj;
+    broadCast(topic, patchObj, ws);
+  }
 }
 
 function broadCast(topic, patchObj, ignore) {
+  logger.debug(`Content ${topic}:\n ${JSON.stringify(topics[topic].content)}`)
   const sockets = topics[topic].sockets;
-  console.log("sockets length: " + sockets.length);
+  logger.debug("sockets length: " + sockets.length);
   const openSockets = ignore ? [ignore] : [];
   for (let index = 0; index < sockets.length; index += 1) {
     let socket = sockets[index];
@@ -162,7 +114,7 @@ function broadCast(topic, patchObj, ignore) {
         patch: patchObj,
         content: topics[topic].message,
       };
-      console.log("state: " + socket.readyState);
+      logger.debug("state: " + socket.readyState);
       if (socket.readyState === 1) {
         socket.send(JSON.stringify(data));
         openSockets.push(socket);
@@ -172,26 +124,35 @@ function broadCast(topic, patchObj, ignore) {
   topics[topic].sockets = openSockets;
 }
 
-function onMsg(ws, topic, msg) {
-  msgObj = JSON.parse(msg);
+function onMsg(ws, topic, msgObj) {
   updateTopic(ws, msgObj.user, topic, msgObj.patchObj);
 }
 
 function onCreate(ws, user, topic) {
-  config.authFunc(user, topic, authSuccess(ws, user, topic), authFailure(ws, user, topic));
+  collabConfig.authFunc(user, topic, authSuccess(ws, user, topic), authFailure(ws, user, topic));
 }
 
 app.ws('/topic/:identifier', (ws, req) => {
     ws.on('message', msg => {
-      const topic = req.params.identifier;
-      if (sockets.indexOf(ws) === -1) {
-        sockets.push(ws);
-        console.log('On Create ' + sockets.length);
-
-        onCreate(ws, JSON.parse(msg), topic);
-      } else {
-        console.log('On Message ' + sockets.length);
-        onMsg(ws, topic, msg);
+      logger.debug("Incomming message: " + msg);
+      try {
+        const msgObj = JSON.parse(msg);
+        logger.debug("JSON parse successful");
+        const topic = req.params.identifier;
+        if (sockets.indexOf(ws) === -1) {
+          sockets.push(ws);
+          console.log('On Create ' + sockets.length);
+          onCreate(ws, msgObj, topic);
+        } else {
+          console.log('On Message ' + sockets.length);
+          onMsg(ws, topic, msgObj);
+        }
+      } catch (e) {
+        let errorMsg = "All messages must be a valid json string";
+        logger.error(e);
+        logger.error(errorMsg);
+        ws.send(errorMsg);
+        ws.close();
       }
     });
 
@@ -207,4 +168,5 @@ app.ws('/topic/:identifier', (ws, req) => {
     });
 });
 
-app.listen(8000)
+console.log(configSrvc('PORT'))
+app.listen(configSrvc('PORT'))
