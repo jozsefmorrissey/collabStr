@@ -12,7 +12,7 @@ logger.info("Config: \n" + JSON.stringify(propList, null, 2));
 
 const app = express();
 const sockets = [];
-const saveStaleInterval = 5000000;
+const saveStaleInterval = 300000;
 let socketCount = 0;
 
 const topics = {};
